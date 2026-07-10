@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, watchFile, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
@@ -17,6 +19,86 @@ import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "
 
 const graphemeSegmenter = getGraphemeSegmenter();
 const wordSegmenter = getWordSegmenter();
+const EXTERNAL_CURSOR_FOCUS_STATE_FILE = process.env.PI_EDITOR_CURSOR_FOCUS_STATE_FILE;
+const EXTERNAL_CURSOR_FOCUS_FILE = process.env.PI_EDITOR_CURSOR_FOCUS_FILE ?? process.env.BLUEPI_CURSOR_FOCUS_FILE;
+const EXTERNAL_CURSOR_FOCUSED_BG = process.env.PI_EDITOR_CURSOR_FOCUSED_BG ?? "#55FF55";
+const EXTERNAL_CURSOR_FOCUSED_FG = process.env.PI_EDITOR_CURSOR_FOCUSED_FG ?? "#000000";
+const externalCursorTuis = new Set<TUI>();
+let externalCursorFocusWatcherInstalled = false;
+let externalCursorFocused = readExternalCursorFocusFile();
+
+function parseExternalCursorFocus(value: string): boolean | undefined {
+	const normalized = value.trim().toLowerCase();
+	if (["1", "true", "yes", "focused", "active", "green"].includes(normalized)) return true;
+	if (["0", "false", "no", "blurred", "inactive", "gray", "grey"].includes(normalized)) return false;
+	return undefined;
+}
+
+function externalCursorFocusWatchFile(): string | undefined {
+	return EXTERNAL_CURSOR_FOCUS_STATE_FILE ?? EXTERNAL_CURSOR_FOCUS_FILE;
+}
+
+function readExternalCursorFocusFile(): boolean | undefined {
+	const file = externalCursorFocusWatchFile();
+	if (!file) return undefined;
+	try {
+		const contents = readFileSync(file, "utf8");
+		if (!EXTERNAL_CURSOR_FOCUS_STATE_FILE) return parseExternalCursorFocus(contents);
+		const match = /^\s*right_pane_focused\s*=\s*([^#\n]+)/m.exec(contents);
+		return match ? parseExternalCursorFocus(match[1]!) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function ensureExternalCursorFocusFile(): void {
+	const file = externalCursorFocusWatchFile();
+	if (!file || existsSync(file)) return;
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, EXTERNAL_CURSOR_FOCUS_STATE_FILE ? "[tmux_state]\nright_pane_focused = false\n" : "0");
+	} catch {}
+}
+
+function registerExternalCursorFocusWatcher(tui: TUI): void {
+	const file = externalCursorFocusWatchFile();
+	if (!file) return;
+	externalCursorTuis.add(tui);
+	if (externalCursorFocusWatcherInstalled) return;
+	externalCursorFocusWatcherInstalled = true;
+	ensureExternalCursorFocusFile();
+	externalCursorFocused = readExternalCursorFocusFile();
+	watchFile(file, { interval: 100 }, () => {
+		const next = readExternalCursorFocusFile();
+		if (next === externalCursorFocused) return;
+		externalCursorFocused = next;
+		for (const item of externalCursorTuis) {
+			item.requestRender();
+		}
+	});
+}
+
+function isCursorFocused(fallback: boolean): boolean {
+	return externalCursorFocusWatchFile() ? (externalCursorFocused ?? fallback) : fallback;
+}
+
+function hexColorToAnsiRgb(color: string, kind: 38 | 48): string | undefined {
+	const match = /^#?([0-9a-f]{6})$/i.exec(color.trim());
+	if (!match) return undefined;
+	const hex = match[1]!;
+	const r = Number.parseInt(hex.slice(0, 2), 16);
+	const g = Number.parseInt(hex.slice(2, 4), 16);
+	const b = Number.parseInt(hex.slice(4, 6), 16);
+	return `\x1b[${kind};2;${r};${g};${b}m`;
+}
+
+const EXTERNAL_CURSOR_FOCUSED_BG_ANSI = hexColorToAnsiRgb(EXTERNAL_CURSOR_FOCUSED_BG, 48) ?? "\x1b[48;2;85;255;85m";
+const EXTERNAL_CURSOR_FOCUSED_FG_ANSI = hexColorToAnsiRgb(EXTERNAL_CURSOR_FOCUSED_FG, 38) ?? "\x1b[38;2;0;0;0m";
+
+function renderCursorCell(value: string, focused: boolean): string {
+	if (!focused) return `\x1b[7m${value}\x1b[0m`;
+	return `\x1b[27m${EXTERNAL_CURSOR_FOCUSED_BG_ANSI}${EXTERNAL_CURSOR_FOCUSED_FG_ANSI}${value}\x1b[0m`;
+}
 
 /** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
 const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
@@ -328,6 +410,7 @@ export class Editor implements Component, Focusable {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
+		registerExternalCursorFocusWatcher(tui);
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -518,10 +601,9 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Render each visible layout line
-		// Emit hardware cursor marker when focused so TUI can position the
-		// hardware cursor for IME candidate-window placement even while
-		// autocomplete (e.g. slash-command menu) is visible.
-		const emitCursorMarker = this.focused;
+		// External focus lets tmux drive editor cursor rendering when available.
+		const cursorFocused = isCursorFocused(this.focused);
+		const emitCursorMarker = cursorFocused;
 
 		for (const layoutLine of visibleLines) {
 			let displayText = layoutLine.text;
@@ -542,12 +624,12 @@ export class Editor implements Component, Focusable {
 					const afterGraphemes = [...this.segment(after, "grapheme")];
 					const firstGrapheme = afterGraphemes[0]?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
+					const cursor = renderCursorCell(firstGrapheme, cursorFocused);
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
 					// Cursor is at the end - add highlighted space
-					const cursor = "\x1b[7m \x1b[0m";
+					const cursor = renderCursorCell(" ", cursorFocused);
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
 					// If cursor overflows content width into the padding, flag it
