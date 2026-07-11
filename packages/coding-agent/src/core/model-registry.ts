@@ -34,6 +34,7 @@ import {
 	getConfigValueEnvVarNames,
 	isCommandConfigValue,
 	isConfigValueConfigured,
+	resolveConfigValue,
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
@@ -456,7 +457,10 @@ export class ModelRegistry {
 				if (providerOverride) {
 					model = {
 						...model,
-						baseUrl: providerOverride.baseUrl ?? model.baseUrl,
+						baseUrl: providerOverride.baseUrl
+							? (resolveConfigValue(providerOverride.baseUrl, this.authStorage.getProviderEnv(provider)) ??
+								model.baseUrl)
+							: model.baseUrl,
 						compat: mergeCompat(model.compat, providerOverride.compat),
 					};
 				}
@@ -623,8 +627,13 @@ export class ModelRegistry {
 				const api = modelDef.api ?? providerConfig.api ?? builtInDefaults?.api;
 				if (!api) continue;
 
-				const baseUrl = modelDef.baseUrl ?? providerConfig.baseUrl ?? builtInDefaults?.baseUrl;
-				if (!baseUrl) continue;
+				const rawBaseUrl = modelDef.baseUrl ?? providerConfig.baseUrl ?? builtInDefaults?.baseUrl;
+				if (!rawBaseUrl) continue;
+				const baseUrl = resolveConfigValueOrThrow(
+					rawBaseUrl,
+					`baseUrl for provider "${providerName}"`,
+					this.authStorage.getProviderEnv(providerName),
+				);
 
 				const compat = mergeCompat(providerConfig.compat, modelDef.compat);
 				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
