@@ -19,56 +19,45 @@ import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "
 
 const graphemeSegmenter = getGraphemeSegmenter();
 const wordSegmenter = getWordSegmenter();
-const EXTERNAL_CURSOR_FOCUS_STATE_FILE = process.env.PI_EDITOR_CURSOR_FOCUS_STATE_FILE;
-const EXTERNAL_CURSOR_FOCUS_FILE = process.env.PI_EDITOR_CURSOR_FOCUS_FILE ?? process.env.BLUEPI_CURSOR_FOCUS_FILE;
+const EXTERNAL_CURSOR_FOCUS_FILE = process.env.PI_EDITOR_CURSOR_FOCUS_FILE;
 const EXTERNAL_CURSOR_FOCUSED_BG = process.env.PI_EDITOR_CURSOR_FOCUSED_BG ?? "#55FF55";
 const EXTERNAL_CURSOR_FOCUSED_FG = process.env.PI_EDITOR_CURSOR_FOCUSED_FG ?? "#000000";
 const externalCursorTuis = new Set<TUI>();
 let externalCursorFocusWatcherInstalled = false;
 let externalCursorFocused = readExternalCursorFocusFile();
 
-function parseExternalCursorFocus(value: string): boolean | undefined {
-	const normalized = value.trim().toLowerCase();
-	if (["1", "true", "yes", "focused", "active", "green"].includes(normalized)) return true;
-	if (["0", "false", "no", "blurred", "inactive", "gray", "grey"].includes(normalized)) return false;
+export function parseExternalCursorFocus(value: string): boolean | undefined {
+	const normalized = value.trim();
+	if (normalized === "1") return true;
+	if (normalized === "0") return false;
 	return undefined;
 }
 
-function externalCursorFocusWatchFile(): string | undefined {
-	return EXTERNAL_CURSOR_FOCUS_STATE_FILE ?? EXTERNAL_CURSOR_FOCUS_FILE;
-}
-
 function readExternalCursorFocusFile(): boolean | undefined {
-	const file = externalCursorFocusWatchFile();
-	if (!file) return undefined;
+	if (!EXTERNAL_CURSOR_FOCUS_FILE) return undefined;
 	try {
-		const contents = readFileSync(file, "utf8");
-		if (!EXTERNAL_CURSOR_FOCUS_STATE_FILE) return parseExternalCursorFocus(contents);
-		const match = /^\s*right_pane_focused\s*=\s*([^#\n]+)/m.exec(contents);
-		return match ? parseExternalCursorFocus(match[1]!) : undefined;
+		return parseExternalCursorFocus(readFileSync(EXTERNAL_CURSOR_FOCUS_FILE, "utf8"));
 	} catch {
 		return undefined;
 	}
 }
 
 function ensureExternalCursorFocusFile(): void {
-	const file = externalCursorFocusWatchFile();
-	if (!file || existsSync(file)) return;
+	if (!EXTERNAL_CURSOR_FOCUS_FILE || existsSync(EXTERNAL_CURSOR_FOCUS_FILE)) return;
 	try {
-		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, EXTERNAL_CURSOR_FOCUS_STATE_FILE ? "[tmux_state]\nright_pane_focused = false\n" : "0");
+		mkdirSync(dirname(EXTERNAL_CURSOR_FOCUS_FILE), { recursive: true });
+		writeFileSync(EXTERNAL_CURSOR_FOCUS_FILE, "0");
 	} catch {}
 }
 
 function registerExternalCursorFocusWatcher(tui: TUI): void {
-	const file = externalCursorFocusWatchFile();
-	if (!file) return;
+	if (!EXTERNAL_CURSOR_FOCUS_FILE) return;
 	externalCursorTuis.add(tui);
 	if (externalCursorFocusWatcherInstalled) return;
 	externalCursorFocusWatcherInstalled = true;
 	ensureExternalCursorFocusFile();
 	externalCursorFocused = readExternalCursorFocusFile();
-	watchFile(file, { interval: 100 }, () => {
+	const watcher = watchFile(EXTERNAL_CURSOR_FOCUS_FILE, { interval: 100 }, () => {
 		const next = readExternalCursorFocusFile();
 		if (next === externalCursorFocused) return;
 		externalCursorFocused = next;
@@ -76,10 +65,11 @@ function registerExternalCursorFocusWatcher(tui: TUI): void {
 			item.requestRender();
 		}
 	});
+	watcher.unref();
 }
 
 function isCursorFocused(fallback: boolean): boolean {
-	return externalCursorFocusWatchFile() ? (externalCursorFocused ?? fallback) : fallback;
+	return EXTERNAL_CURSOR_FOCUS_FILE ? (externalCursorFocused ?? fallback) : fallback;
 }
 
 function hexColorToAnsiRgb(color: string, kind: 38 | 48): string | undefined {

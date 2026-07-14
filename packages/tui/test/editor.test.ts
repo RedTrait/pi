@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
-import { Editor, wordWrapLine } from "../src/components/editor.ts";
+import { Editor, parseExternalCursorFocus, wordWrapLine } from "../src/components/editor.ts";
 import { TUI } from "../src/tui.ts";
 import { visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
@@ -39,6 +39,15 @@ async function flushAutocomplete(): Promise<void> {
 }
 
 describe("Editor component", () => {
+	describe("external cursor focus", () => {
+		it("accepts only the pane focus protocol values", () => {
+			assert.strictEqual(parseExternalCursorFocus("1"), true);
+			assert.strictEqual(parseExternalCursorFocus("0"), false);
+			assert.strictEqual(parseExternalCursorFocus("focused"), undefined);
+			assert.strictEqual(parseExternalCursorFocus("[tmux_state]\nright_pane_focused = true"), undefined);
+		});
+	});
+
 	describe("Prompt history navigation", () => {
 		it("does nothing on Up arrow when history is empty", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
